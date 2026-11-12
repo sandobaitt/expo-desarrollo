@@ -1,0 +1,19 @@
+{
+  "name": "api-conductores",
+  "version": "1.0.0",
+  "description": "API de conductores disponibles por zona: demo de Redis (caché y datos efímeros) medida con k6",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "presencia": "node scripts/presencia.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "fastify": "^5.6.1",
+    "ioredis": "^5.8.2",
+    "pg": "^8.16.3"
+  }
+}

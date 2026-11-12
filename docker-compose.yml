@@ -1,0 +1,79 @@
+# Demo integrada: API de conductores + PostgreSQL + Redis, medida con k6.
+# Uso rápido:   docker compose up -d --build --wait
+# Rondas:       ./scripts/ronda.sh r0   (ver README)
+
+services:
+  # Fuente de verdad. Los scripts de db/init se ejecutan solos la primera vez (esquema + 200.000 conductores).
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    # pg_stat_statements registra el tiempo de cada consulta (ronda R1).
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "max_connections=50"]
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/consultas:/consultas:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # Por TCP: mientras carga la semilla, PostgreSQL solo escucha por socket local,
+      # así que la API no arranca hasta que los 200.000 conductores estén cargados.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U demo -d demo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Caché y datos efímeros. Límite de memoria + política de desalojo, sin persistencia en disco:
+  # si se reinicia arranca vacío, y los datos verdaderos siguen en PostgreSQL.
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # La API. Cada ronda cambia estas variables (ver scripts/ronda.sh).
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgres://demo:demo@db:5432/demo
+      REDIS_URL: redis://redis:6379
+      CACHE_HABILITADA: ${CACHE_HABILITADA:-true}
+      INVALIDACION_HABILITADA: ${INVALIDACION_HABILITADA:-true}
+      CACHE_TTL_S: ${CACHE_TTL_S:-30}
+      PRESENCIA_TTL_S: ${PRESENCIA_TTL_S:-30}
+      API_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    cpus: 1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/salud"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Generador de carga. Solo se usa con "docker compose run --rm k6 ...".
+  k6:
+    image: grafana/k6:1.3.0
+    profiles: ["k6"]
+    user: root
+    working_dir: /trabajo
+    environment:
+      BASE_URL: http://api:3000
+    volumes:
+      - ./k6:/trabajo/k6:ro
+      - ./resultados:/trabajo/resultados
+    depends_on:
+      api:
+        condition: service_healthy
