@@ -58,7 +58,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/salud"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/salud"]
       interval: 2s
       timeout: 3s
       retries: 30

@@ -12,6 +12,8 @@ import { BASE_URL, elegirZona, reiniciarEstadisticas, mostrarEstadisticasServido
 
 const MAX = Number(__ENV.MAX_RPS || 400)
 const PASO = __ENV.PASO || '1m'
+const CALENTAMIENTO = __ENV.CALENTAMIENTO || '30s'
+const RAMPA = __ENV.RAMPA || '10s'
 
 // Métrica propia: porcentaje de respuestas que vinieron de Redis (encabezado X-Cache: HIT).
 const cacheHit = new Rate('cache_hit')
@@ -23,7 +25,7 @@ export const options = {
       executor: 'constant-arrival-rate',
       rate: Math.round(MAX / 8),
       timeUnit: '1s',
-      duration: '30s',
+      duration: CALENTAMIENTO,
       preAllocatedVUs: 20,
       maxVUs: 100
     },
@@ -31,18 +33,18 @@ export const options = {
     // el servidor. Si se pone lento, se forma fila y se nota (evita la omisión coordinada).
     carga: {
       executor: 'ramping-arrival-rate',
-      startTime: '30s',
+      startTime: CALENTAMIENTO,
       startRate: Math.round(MAX / 8),
       timeUnit: '1s',
       preAllocatedVUs: 50,
       maxVUs: 400,
       stages: [
         { target: Math.round(MAX / 8), duration: PASO },
-        { target: Math.round(MAX / 4), duration: '10s' },
+        { target: Math.round(MAX / 4), duration: RAMPA },
         { target: Math.round(MAX / 4), duration: PASO },
-        { target: Math.round(MAX / 2), duration: '10s' },
+        { target: Math.round(MAX / 2), duration: RAMPA },
         { target: Math.round(MAX / 2), duration: PASO },
-        { target: MAX, duration: '10s' },
+        { target: MAX, duration: RAMPA },
         { target: MAX, duration: PASO }
       ]
     }

@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Ejecuta cada ronda de la demo con docker compose.
 # Uso: ./scripts/ronda.sh <comando>
-#   levantar | semilla | smoke | r0 | r1 | r2 | r3 | r3-sin-indice | r4 | r4-sin | r5 | r6 | estadisticas | todo | bajar
+#   levantar | semilla | smoke | r0 | r1 | r2 | r3 | r3-sin-indice | r4 | r4-sin | r5 | r6 | estadisticas | demo | tabla | todo | bajar
+#   demo = versión corta (~4 min): r0, r1, r2, r3, r4, r4-sin, r5 y tabla de resultados
 #
 # Variables opcionales:
 #   MAX_RPS=200   pedidos por segundo del último escalón (subilo si R0 no se satura en tu máquina)
+#   RAPIDO=1     tiempos recortados (lo activa 'demo'): cada ronda dura ~30 s en vez de ~2,5 min
 #   PASO=20s      duración de cada escalón (1m para la medición "oficial", 20s para la demo en vivo)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MAX_RPS="${MAX_RPS:-200}"
-PASO="${PASO:-20s}"
+if [ "${RAPIDO:-0}" = 1 ]; then
+  MAX_RPS="${MAX_RPS:-400}"; PASO="${PASO:-5s}"; CALENT="${CALENT:-3s}"; RAMPA="${RAMPA:-2s}"
+  DURACION="${DURACION:-15s}"; export PRESENCIA_TTL_S="${PRESENCIA_TTL_S:-9}"; ESPERA_R6=10
+else
+  MAX_RPS="${MAX_RPS:-200}"; PASO="${PASO:-20s}"; CALENT="${CALENT:-30s}"; RAMPA="${RAMPA:-10s}"
+  DURACION="${DURACION:-40s}"; ESPERA_R6=40
+fi
 DC="docker compose"
 
 titulo () { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
@@ -22,7 +29,7 @@ api ()    { # api <cache true|false> <invalidacion true|false>
 vaciar_redis () { $DC exec -T redis redis-cli FLUSHALL >/dev/null; echo "Redis vaciado"; }
 k6 ()     { # k6 <script> <ronda> [más -e]
   local script="$1" ronda="$2"; shift 2
-  $DC run --rm k6 run -q -e RONDA="$ronda" -e MAX_RPS="$MAX_RPS" -e PASO="$PASO" "$@" "k6/$script"
+  $DC run --rm --no-deps k6 run -q -e RONDA="$ronda" -e MAX_RPS="$MAX_RPS" -e PASO="$PASO" -e CALENTAMIENTO="$CALENT" -e RAMPA="$RAMPA" "$@" "k6/$script"
 }
 
 case "${1:-}" in
@@ -77,13 +84,13 @@ case "${1:-}" in
     sql /consultas/indice-crear.sql
     api true true
     vaciar_redis
-    k6 mixto.js r4-con-invalidacion -e DURACION=40s || true
+    k6 mixto.js r4-con-invalidacion -e DURACION=$DURACION || true
     ;;
   r4-sin)
     titulo "R4 · Invalidación bajo escritura: SIN invalidación (el ocupado sigue apareciendo hasta 30 s)"
     api true false
     vaciar_redis
-    k6 mixto.js r4-sin-invalidacion -e DURACION=40s || true
+    k6 mixto.js r4-sin-invalidacion -e DURACION=$DURACION || true
     api true true
     ;;
   r5)
@@ -97,14 +104,34 @@ case "${1:-}" in
     vaciar_redis
     k6 carga.js r6 &
     PID=$!
-    sleep 45; titulo "Apagando Redis..."; $DC stop redis >/dev/null
+    sleep $((ESPERA_R6 + 5)); titulo "Apagando Redis..."; $DC stop redis >/dev/null
     curl -si localhost:3000/zonas/centro/conductores-disponibles | grep -i '^x-cache' || true
-    sleep 35; titulo "Encendiendo Redis..."; $DC start redis >/dev/null
+    sleep $ESPERA_R6; titulo "Encendiendo Redis..."; $DC start redis >/dev/null
     sleep 3; curl -si localhost:3000/zonas/centro/conductores-disponibles | grep -i '^x-cache' || true
     wait $PID || true
     ;;
   estadisticas)
     curl -s localhost:3000/estadisticas; echo
+    ;;
+  demo)
+    export RAPIDO=1
+    $0 levantar
+    for r in r0 r1 r2 r3 r4 r4-sin r5; do "$0" "$r"; done
+    "$0" tabla
+    ;;
+  tabla)
+    titulo "Resultados (última corrida de cada ronda)"
+    printf '%-24s %10s %10s %9s %10s\n' Ronda "pedidos/s" "p95 (ms)" "errores" "aciertos"
+    for r in r0 r2 r3 r3-sin-indice r4-con-invalidacion r4-sin-invalidacion r6; do
+      f=$(ls -t resultados/"$r"-2*.json 2>/dev/null | head -1) || true
+      [ -n "${f:-}" ] || continue
+      jq -r --arg r "$r" '.metrics as $m | [$r,
+        ($m.http_reqs.values.rate | floor),
+        (($m["http_req_duration{endpoint:disponibles}"] // $m.http_req_duration).values["p(95)"] * 10 | round / 10),
+        (($m.http_req_failed.values.rate * 100 * 100 | round) / 100 | tostring + " %"),
+        (if $m.cache_hit then (($m.cache_hit.values.rate * 1000 | round) / 10 | tostring + " %") else "—" end)] | @tsv' "$f" |
+        awk -F'\t' '{printf "%-24s %10s %10s %9s %10s\n",$1,$2,$3,$4,$5}'
+    done
     ;;
   todo)
     for r in smoke r0 r1 r2 r3 r4 r4-sin r5 r6; do "$0" "$r"; done
