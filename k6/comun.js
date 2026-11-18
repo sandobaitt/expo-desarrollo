@@ -1,6 +1,7 @@
 // Código compartido por los scripts de k6.
 import http from 'k6/http'
 import { SharedArray } from 'k6/data'
+import { Gauge } from 'k6/metrics'
 
 export const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000'
 export const RONDA = __ENV.RONDA || 'sin-nombre'
@@ -24,9 +25,16 @@ export function reiniciarEstadisticas () {
   http.post(`${BASE_URL}/estadisticas/reiniciar`)
 }
 
+// Lo que vio el servidor, guardado como métricas para que quede en el JSON de cada corrida.
+// (k6 mide desde afuera; cuántas consultas llegaron a PostgreSQL solo lo sabe la API).
+const consultasBasePorSegundo = new Gauge('servidor_consultas_base_por_s')
+const aciertosSegunRedis = new Gauge('servidor_aciertos_redis')
+
 // Al terminar: lo que vio el servidor (consultas a la base y aciertos de Redis).
 export function mostrarEstadisticasServidor () {
   const e = http.get(`${BASE_URL}/estadisticas`).json()
+  consultasBasePorSegundo.add(e.consultasBasePorSegundo)
+  if (e.redis && typeof e.redis.tasaAciertos === 'number') aciertosSegunRedis.add(e.redis.tasaAciertos)
   const tasa = e.redis && e.redis.tasaAciertos !== null && e.redis.tasaAciertos !== undefined
     ? `${(e.redis.tasaAciertos * 100).toFixed(1)} %`
     : 'sin datos'
@@ -55,6 +63,7 @@ export function resumen (datos) {
     `Pedidos con error ...... ${pct(valor('http_req_failed', 'rate'))}`,
     `Verificaciones OK ...... ${pct(valor('checks', 'rate'))}`,
     `Aciertos de caché ...... ${pct(valor('cache_hit', 'rate'))}`,
+    `Consultas a la base .... ${valor('servidor_consultas_base_por_s', 'value') ?? '—'} por segundo (según la API)`,
     ...(m.lista_actualizada
       ? [`Lista actualizada ...... ${pct(valor('lista_actualizada', 'rate'))} (el conductor ocupado ya no aparece)`]
       : []),

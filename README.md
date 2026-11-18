@@ -21,6 +21,7 @@ API de conductores (Node.js + Fastify) ──── 1. GET clave · 3. SET con T
 
 - Docker con Docker Compose v2 (`docker compose version`).
 - `bash` y `curl` para el script de rondas. En Windows: WSL o Git Bash.
+- `jq` solo para `./scripts/ronda.sh tabla` (en Ubuntu: `sudo apt install jq`).
 - No hace falta instalar Node, k6 ni PostgreSQL: todo corre en contenedores.
 
 ## Levantar
@@ -43,6 +44,7 @@ el encabezado `X-Cache`:
 ## Rondas de la demo
 
 ```bash
+./scripts/ronda.sh calibrar      # una vez por máquina: busca la carga que satura R0 (ver abajo)
 ./scripts/ronda.sh smoke         # prueba de humo: ¿funciona lo básico?
 ./scripts/ronda.sh r0            # línea base
 ./scripts/ronda.sh r1            # diagnóstico
@@ -52,7 +54,9 @@ el encabezado `X-Cache`:
 ./scripts/ronda.sh r4-sin        # invalidación OFF
 ./scripts/ronda.sh r5            # datos efímeros
 ./scripts/ronda.sh r6            # Redis se cae durante la carga
-./scripts/ronda.sh todo          # todas en orden
+./scripts/ronda.sh todo          # todas en orden (≈ 20 min)
+./scripts/ronda.sh demo          # versión corta para la exposición (≈ 4 min): r0 a r5 + tabla
+./scripts/ronda.sh tabla         # resumen de la última corrida de cada ronda
 ./scripts/ronda.sh r3-sin-indice # control opcional: Redis sin índice
 ```
 
@@ -66,22 +70,42 @@ el encabezado `X-Cache`:
 | R5 · Datos efímeros | Un conductor deja de mandar su señal | Desaparece solo cuando vence `vivo:<id>`, sin escribir en la base |
 | R6 · Redis caído | Se apaga Redis a los 45 s y se enciende a los 80 s | Cero errores: la API responde desde PostgreSQL y vuelve a usar Redis sola |
 
-### Ajustar la carga a tu máquina
+### Ajustar la carga a tu máquina (calibración)
+
+Para que la demo muestre algo, **R0 tiene que saturarse**: umbrales en rojo e iteraciones perdidas. Con
+qué carga pasa eso depende de la computadora: en una máquina de 2 núcleos alcanza con 400 pedidos por
+segundo; en la del grupo, con 400 R0 todavía cumplió los umbrales (ver más abajo).
 
 ```bash
-MAX_RPS=300 PASO=20s ./scripts/ronda.sh r0
+RAPIDO=1 ./scripts/ronda.sh calibrar    # prueba R0 con 200, 400, 800, 1600 y 3200 pedidos/s
+MAX_RPS=800 ./scripts/ronda.sh demo      # usar el valor que indicó la calibración, en TODAS las rondas
 ```
 
-- `MAX_RPS` es el último escalón (por defecto 200). Los escalones son 1/8, 1/4, 1/2 y el total.
-- **Calibración:** R0 tiene que saturarse (umbrales en rojo). Si en tu máquina R0 pasa todo, subí `MAX_RPS`.
-- `PASO` es la duración de cada escalón: `20s` para la demo en vivo (≈ 2,5 min por ronda), `1m` para la medición completa.
-- Se usa siempre la misma `MAX_RPS` en todas las rondas: si cambia la carga, la comparación no vale.
+La calibración es una prueba de **punto de quiebre** (*breakpoint*): sube la carga hasta que R0 deja de
+cumplir y propone ese valor.
+
+| Variable | Por defecto | Con `RAPIDO=1` (`demo`) | Qué controla |
+| --- | --- | --- | --- |
+| `MAX_RPS` | 200 | 400 | Último escalón; los anteriores son 1/8, 1/4 y 1/2 |
+| `PASO` | 20s | 5s | Duración de cada escalón (`1m` para la medición completa) |
+| `CALENT` | 30s | 3s | Calentamiento, que no se evalúa (en k6: `-e CALENTAMIENTO=`) |
+| `RAMPA` | 10s | 2s | Subida entre escalones |
+| `DURACION` | 40s | 15s | Duración de R4 |
+| `PRESENCIA_TTL_S` | 30 | 9 | Vida de la señal del conductor en R5 |
+
+Se usa siempre la misma `MAX_RPS` en todas las rondas: si cambia la carga, la comparación no vale.
 
 ## Resultados de referencia
 
-Medidos el 2026-11-12 en una máquina Linux de 2 núcleos, con PostgreSQL 16, Redis 7, Node 22 y k6 1.3.0
-corriendo en el mismo equipo. **Los números absolutos cambian en cada máquina; lo que se repite es la
-diferencia entre rondas.** Los JSON completos están en `resultados/referencia/`.
+Medidos el 2026-11-12 en una máquina Linux de 2 núcleos, con escalones de 20 s (`PASO=20s`). En esa
+máquina no había acceso a Docker Hub, así que los servicios corrieron instalados directamente:
+PostgreSQL 16, Redis 7, Node 22 y k6 1.3.0, todos en el mismo equipo. El `docker-compose.yml` usa
+PostgreSQL 17 y Redis 8; la diferencia entre rondas no depende de esas versiones.
+
+Hay **una corrida por ronda**. **Los números absolutos cambian en cada máquina; lo que se repite es la
+diferencia entre rondas.** Los JSON completos están en `resultados/referencia/`. Las consultas a
+PostgreSQL por segundo de esta tabla las imprimió k6 al terminar; desde esta versión también quedan en el
+JSON, en la métrica `servidor_consultas_base_por_s`.
 
 | Ronda | Carga | p95 | p99 | Errores | Consultas a PostgreSQL | Aciertos Redis | Umbrales |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -103,6 +127,23 @@ descartadas por proceso) → **0,16 ms** con *Index Scan* (lee 20 filas).
 - **Control:** Redis solo también "arregla" el p95, pero el p99 sube a 11,9 ms porque cada fallo paga la consulta lenta. Por eso primero el índice y después la caché.
 - **R4:** el TTL solo no alcanza para no mostrar datos viejos; hace falta invalidar. El TTL queda como red de seguridad.
 - **R6:** la caché nunca es imprescindible.
+
+### Corridas del modo `demo` en la máquina del grupo (12/11)
+
+En `resultados/` están las corridas de `./scripts/ronda.sh demo` (escalones de 5 s, hasta 400 pedidos por
+segundo):
+
+| Ronda | Pedidos/s | p95 | p99 | Aciertos Redis | Lista actualizada |
+| --- | --- | --- | --- | --- | --- |
+| R0 · Sin índice ni Redis | 170 | 33,5 ms | 67,8 ms | — | — |
+| R2 · Índice | 170 | 2,5 ms | 55,1 ms | — | — |
+| R3 · Índice + Redis | 170 | 1,6 ms | 25,8 ms | 98,9 % | — |
+| R4 · Con invalidación | 170 | 3,9 ms | 5,3 ms | 94,4 % | 100 % |
+| R4 · Sin invalidación | 170 | 1,8 ms | 4,8 ms | 97,8 % | **0 %** |
+
+Se repiten las conclusiones: el índice baja el p95 13 veces, Redis lo baja más y la invalidación es la que
+evita el dato viejo. Pero **R0 cumplió los umbrales**: con 400 pedidos por segundo esa máquina no llega a
+saturarse. Antes de exponer hay que correr `calibrar` y usar el `MAX_RPS` que proponga.
 
 ## Endpoints
 
@@ -156,7 +197,7 @@ docker compose exec db psql -U demo -d demo -f /consultas/diagnostico.sql
 | `api/src/presencia.js` y `api/scripts/presencia.js` | Datos efímeros: latido con TTL, `MGET` | Renzo |
 | `k6/carga.js` → `scenarios` | Modelo abierto, calentamiento, escalones | More |
 | `k6/comun.js` → `elegirZona` | `SharedArray` y zonas calientes (80/20) | More |
-| `k6/carga.js` → `thresholds`, `cache_hit`; `k6/comun.js` → `resumen` | Umbrales, métrica propia, `handleSummary` | Agustín |
+| `k6/carga.js` → `thresholds`, `cache_hit`; `k6/comun.js` → `resumen` | Umbrales, métricas propias, `handleSummary` | Agustín |
 | `k6/mixto.js` | R4: lecturas y escrituras en paralelo, check de consistencia | Agustín y Lucho |
 | `db/init/*.sql`, `db/consultas/*.sql` | Semilla fija, índice, `EXPLAIN`, `pg_stat_statements` | Pagno |
 | `api/src/db.js` | Pool de 10 conexiones, consultas, contador | Pagno y Mateo |

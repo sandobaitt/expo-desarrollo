@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Ejecuta cada ronda de la demo con docker compose.
 # Uso: ./scripts/ronda.sh <comando>
-#   levantar | semilla | smoke | r0 | r1 | r2 | r3 | r3-sin-indice | r4 | r4-sin | r5 | r6 | estadisticas | demo | tabla | todo | bajar
-#   demo = versión corta (~4 min): r0, r1, r2, r3, r4, r4-sin, r5 y tabla de resultados
+#   levantar | semilla | calibrar | smoke | r0 | r1 | r2 | r3 | r3-sin-indice | r4 | r4-sin | r5 | r6 | estadisticas | demo | tabla | todo | bajar
+#   calibrar = busca la carga a la que R0 deja de cumplir los umbrales en ESTA máquina (correr una vez antes de la demo)
+#   demo  = versión corta (~4 min): r0, r1, r2, r3, r4, r4-sin, r5 y tabla de resultados
+#   tabla = resumen de la última corrida de cada ronda (necesita jq)
 #
 # Variables opcionales:
 #   MAX_RPS=200   pedidos por segundo del último escalón (subilo si R0 no se satura en tu máquina)
@@ -110,6 +112,26 @@ case "${1:-}" in
     sleep 3; curl -si localhost:3000/zonas/centro/conductores-disponibles | grep -i '^x-cache' || true
     wait $PID || true
     ;;
+  calibrar)
+    titulo "Calibración: ¿a qué carga se satura R0 (sin índice ni Redis) en esta máquina?"
+    sql /consultas/indice-borrar.sql
+    api false true
+    elegido=""
+    for m in 200 400 800 1600 3200; do
+      printf 'Probando MAX_RPS=%-5s ... ' "$m"
+      if MAX_RPS=$m k6 carga.js "calibracion-$m" >/dev/null 2>&1; then
+        echo "R0 cumple los umbrales (la base todavía aguanta)"
+      else
+        echo "R0 NO cumple: acá se ve el cuello de botella"
+        elegido=$m; break
+      fi
+    done
+    if [ -n "$elegido" ]; then
+      titulo "Usar MAX_RPS=$elegido en TODAS las rondas, por ejemplo: MAX_RPS=$elegido ./scripts/ronda.sh demo"
+    else
+      titulo "Ni con 3200 pedidos/s se saturó: la máquina es muy rápida o k6 no llega a generar la carga. Probá con PASO=20s."
+    fi
+    ;;
   estadisticas)
     curl -s localhost:3000/estadisticas; echo
     ;;
@@ -121,7 +143,7 @@ case "${1:-}" in
     ;;
   tabla)
     titulo "Resultados (última corrida de cada ronda)"
-    printf '%-24s %10s %10s %9s %10s\n' Ronda "pedidos/s" "p95 (ms)" "errores" "aciertos"
+    printf '%-24s %10s %10s %9s %10s %10s\n' Ronda "pedidos/s" "p95 (ms)" "errores" "aciertos" "base/s"
     for r in r0 r2 r3 r3-sin-indice r4-con-invalidacion r4-sin-invalidacion r6; do
       f=$(ls -t resultados/"$r"-2*.json 2>/dev/null | head -1) || true
       [ -n "${f:-}" ] || continue
@@ -129,8 +151,9 @@ case "${1:-}" in
         ($m.http_reqs.values.rate | floor),
         (($m["http_req_duration{endpoint:disponibles}"] // $m.http_req_duration).values["p(95)"] * 10 | round / 10),
         (($m.http_req_failed.values.rate * 100 * 100 | round) / 100 | tostring + " %"),
-        (if $m.cache_hit then (($m.cache_hit.values.rate * 1000 | round) / 10 | tostring + " %") else "—" end)] | @tsv' "$f" |
-        awk -F'\t' '{printf "%-24s %10s %10s %9s %10s\n",$1,$2,$3,$4,$5}'
+        (if ($m.cache_hit and $m.cache_hit.values.rate > 0) then (($m.cache_hit.values.rate * 1000 | round) / 10 | tostring + " %") else "—" end),
+        (if $m.servidor_consultas_base_por_s then ($m.servidor_consultas_base_por_s.values.value | tostring) else "—" end)] | @tsv' "$f" |
+        awk -F'\t' '{printf "%-24s %10s %10s %9s %10s %10s\n",$1,$2,$3,$4,$5,$6}'
     done
     ;;
   todo)

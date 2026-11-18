@@ -29,7 +29,7 @@ let ultimoLatido = -Infinity
 while ((Date.now() - inicio) / 1000 < TTL * 2.5) {
   const t = Math.round((Date.now() - inicio) / 1000)
   if (Date.now() - ultimoLatido >= LATIDO_MS) {
-    // cada TTL/3, todos mandan su señal... salvo el que perdió la señal después de los 20 s
+    // cada TTL/3, todos mandan su señal... salvo el que la perdió (a los 2/3 del TTL)
     await Promise.all(ids.filter(id => !(id === sinSenal && t >= PIERDE_SENAL_S)).map(latido))
     ultimoLatido = Date.now()
   }
